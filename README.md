@@ -81,6 +81,7 @@ python -m roimatch_gui
 ### Run automatic ROI matching:
 
 - After aligning all sessions, click "Auto-Match ROIs". 
+- You can adjust the 'Overlap threshold' - ranging 0.0 - 1.0 - to be more (1.0) or less (0.0) strict about the required spatial overlap across sessions
 - This detects overlapping ROIs across aligned sessions and groups them by shared identity.
 
 ### Review matches:
@@ -96,7 +97,7 @@ python -m roimatch_gui
 - A ```.csv``` file mapping global cell UUIDs to session ROI indices
 - A ```.pkl``` file with detailed match metadata for further use. This can be releaded with 'Load previous Analyses'
 
-![img.png](img.png)
+![img_1.png](img_1.png)
 
 ## Author
 👩‍🔬 Sonja Blumenstock
