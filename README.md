@@ -28,8 +28,8 @@ cd ROIMatchGUI
 2. Create and activate a Python environment:
 
 ```bash
-conda create -n roimatch python=3.8
-conda activate roimatch
+conda create -n roimatchgui python=3.8
+conda activate roimatchgui
 ```
 
 3. Install dependencies and the package
