@@ -95,7 +95,7 @@ python -m roimatch_gui
 ### Output includes:
 
 - A ```.csv``` file mapping global cell UUIDs to session ROI indices
-- A ```.pkl``` file with detailed match metadata for further use. This can be releaded with 'Load previous Analyses'
+- A ```.pkl``` file with detailed match metadata for further use. This can be reloaded with 'Load previous Analyses'
 
 ![img_1.png](img_1.png)
 
