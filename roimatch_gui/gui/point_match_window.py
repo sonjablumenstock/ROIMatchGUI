@@ -1,6 +1,6 @@
 import numpy as np
 from PyQt5.QtWidgets import (
-    QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout, QWidget
+    QMainWindow, QPushButton, QVBoxLayout, QHBoxLayout, QWidget, QMessageBox
 )
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -207,13 +207,27 @@ class PointMatchWindow(QMainWindow):
         self.fixed_canvas.undo()
         self.moving_canvas.undo()
 
+
     def on_done(self):
         fixed_pts = self.fixed_canvas.get_points()
         moving_pts = self.moving_canvas.get_points()
         fixed_labels = self.fixed_canvas.get_labels()
         moving_labels = self.moving_canvas.get_labels()
+
+        # ✅ Check for equal number of points
+        if len(fixed_pts) != len(moving_pts):
+            QMessageBox.warning(
+                self,
+                "Mismatch",
+                f"Uneven number of control points!\n"
+                f"Left: {len(fixed_pts)}, Right: {len(moving_pts)}.\n"
+                f"Please label the same number of points in both images."
+            )
+            return
+
         if self.callback:
             self.callback(fixed_pts, moving_pts, fixed_labels, moving_labels)
+
         self.close()
 
     def get_points(self):

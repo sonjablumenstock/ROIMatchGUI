@@ -66,6 +66,7 @@ class ROIApp(QMainWindow):
 
         auto_match_button = QPushButton("Auto-Match All Sessions")
         auto_match_button.clicked.connect(self.auto_match_rois)
+        auto_match_button.clicked.connect(self.plot_matched_roi_outlines)
 
         save_button = QPushButton("Save Matches")
         save_button.clicked.connect(lambda: self.save_uuid_matches())

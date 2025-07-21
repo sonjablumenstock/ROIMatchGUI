@@ -70,10 +70,10 @@ python -m roimatch_gui
 - Select a sessions "Align to Reference" to open a control point selection window.
 - Click corresponding landmarks in both images to define a transformation. 
 - You can view the side by side images full screen, zoom in/out and move the images synchronously with the 'Pan' tool. 
-- Mislabeled points can be removed with the 'Undo' button
-- 'Reset view' removes all labels
-- Recommended: label min. 6 corresponding pairs.
-- Click 'DONE'
+- Mislabeled points can be removed with the 'Undo' button 
+- 'Reset view' resets the field of view in both images
+- It is recommended to label at least 6 corresponding pairs.
+- Click 'DONE'. This computes the geometric transform to align the images to e
 
 - Repeat for all sessions to be aligned to the reference session
 
