@@ -73,7 +73,7 @@ python -m roimatch_gui
 - Mislabeled points can be removed with the 'Undo' button 
 - 'Reset view' resets the field of view in both images
 - It is recommended to label at least 6 corresponding pairs.
-- Click 'DONE'. This computes the geometric transform to align the images to e
+- Click 'DONE'. This computes the geometric transform to align the images
 
 - Repeat for all sessions to be aligned to the reference session
 
