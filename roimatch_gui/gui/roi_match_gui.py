@@ -731,7 +731,7 @@ class ROIApp(QMainWindow):
             self.status_sessions_label.setText("")
             self.status_alignment_label.setText("")
 
-            QMessageBox.information(self, "Reset Complete", "All sessions and matches have been cleared.")
+            #QMessageBox.information(self, "Reset Complete", "All sessions and matches have been cleared.")
 
 
 
