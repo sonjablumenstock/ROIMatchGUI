@@ -910,66 +910,6 @@ class ROIApp(QMainWindow):
         self.ax.axis('off')
         self.canvas.draw()
 
-    # def plot_matched_roi_outlines(self):
-    #     """
-    #     Plot outlines of matched ROIs from all sessions, aligned to reference.
-    #     Works with either the legacy all_session_mapping or the new matched_groups.
-    #     """
-    #     if not hasattr(self.match_data, 'roiMapRegistered') or not self.match_data.roiMapRegistered:
-    #         QMessageBox.warning(self, "Missing Data",
-    #                             "No registered ROI maps found. Please run Auto-Match or Full Auto first.")
-    #         return
-    #
-    #     self.ax.clear()
-    #
-    #     # Background: registered mean image of the reference session
-    #     ref_idx = getattr(self.match_data, 'ref_index', 0)
-    #     try:
-    #         mean_img = self.match_data.meanFrameRegistered[ref_idx]
-    #     except (IndexError, AttributeError):
-    #         QMessageBox.warning(self, "Missing Data",
-    #                             "Reference mean image not found. Please run Auto-Match or Full Auto first.")
-    #         return
-    #
-    #     vmin, vmax = np.percentile(mean_img, [2, 98])
-    #     self.ax.imshow(mean_img, cmap='gray', vmin=vmin, vmax=vmax)
-    #
-    #     # Choose groups source & normalize to list-of-indices aligned to current session order
-    #     sessions = getattr(self.match_data, "rois", [])
-    #     session_ids = [getattr(s, "session_id", f"session_{i}") for i, s in enumerate(sessions)]
-    #
-    #     if getattr(self.match_data, "all_session_mapping", None):
-    #         groups_for_plot = self.match_data.all_session_mapping  # list[list or None]
-    #     elif getattr(self.match_data, "matched_groups", None):
-    #         groups_for_plot = []
-    #         for g in self.match_data.matched_groups:  # list[dict(session_id->roi_label)]
-    #             groups_for_plot.append([g.get(sid, None) for sid in session_ids])
-    #     else:
-    #         QMessageBox.warning(self, "Missing Data", "No matches found. Run Auto-Match or Full Auto first.")
-    #         return
-    #
-    #     from matplotlib.cm import get_cmap
-    #     from skimage.measure import find_contours
-    #     cmap = get_cmap('tab10')
-    #
-    #     for group in groups_for_plot:  # <-- use groups_for_plot (bug fix)
-    #         color = cmap(np.random.randint(0, 10))
-    #         for sess_idx, roi_idx in enumerate(group):
-    #             if roi_idx is None or roi_idx == -1:
-    #                 continue
-    #             label_map = self.match_data.roiMapRegistered[sess_idx]
-    #             if label_map is None:
-    #                 continue
-    #             label_mask = (label_map == roi_idx).astype(np.uint8)
-    #             if label_mask.max() == 0:
-    #                 continue
-    #             for contour in find_contours(label_mask, level=0.5):
-    #                 self.ax.plot(contour[:, 1], contour[:, 0], color=color, linewidth=1)
-    #
-    #     self.ax.set_title("Matched ROI Outlines")
-    #     self.ax.axis('off')
-    #     self.canvas.draw()
-
 
 
 
