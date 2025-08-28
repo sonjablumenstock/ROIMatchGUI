@@ -1,6 +1,9 @@
 import sys
 import os
 import numpy as np
+import uuid
+import pandas as pd
+from pathlib import Path
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget, QPushButton,
     QFileDialog, QListWidget, QHBoxLayout, QMessageBox, QLineEdit
@@ -14,6 +17,9 @@ from roimatch_gui.utils.mask_utils import create_cell_id_map
 from skimage.transform import estimate_transform
 from skimage.transform import warp
 from .point_match_window import PointMatchWindow
+from .registration_auto import compute_session_transform, warp_label_map, warp_image
+from .matcher_auto import groups_from_all_sessions
+
 
 
 def launch_gui():
@@ -68,6 +74,11 @@ class ROIApp(QMainWindow):
         auto_match_button.clicked.connect(self.auto_match_rois)
         auto_match_button.clicked.connect(self.plot_matched_roi_outlines)
 
+        full_auto_button = QPushButton("Full Auto (No Manual Alignment)")
+        full_auto_button.clicked.connect(self.run_full_auto_match)
+        #self.btn_full_auto = QPushButton("Full Auto (No Manual Alignment)")
+        #self.btn_full_auto.clicked.connect(self.run_full_auto_match)
+
         save_button = QPushButton("Save Matches")
         save_button.clicked.connect(lambda: self.save_uuid_matches())
 
@@ -95,6 +106,7 @@ class ROIApp(QMainWindow):
         workflow_btn_layout.addWidget(ref_button)
         workflow_btn_layout.addWidget(align_button)
         workflow_btn_layout.addWidget(auto_match_button)
+        workflow_btn_layout.addWidget(full_auto_button)
         workflow_btn_layout.addWidget(save_button)
         workflow_btn_layout.addWidget(show_matches_button)
         layout.addLayout(workflow_btn_layout)
@@ -134,10 +146,21 @@ class ROIApp(QMainWindow):
         parts = os.path.normpath(path).split(os.sep)
         return "_".join(parts[-5:-2])
 
+    def progress_start(self, total):
+        # e.g., QProgressDialog or status text with a counter
+        self._prog_total = total;
+        self._prog = 0
+
+    def progress_step(self, msg=""):
+        self._prog += 1
+        self.statusBar().showMessage(f"[{self._prog}/{self._prog_total}] {msg}")
+
+
     def update_session_list_display(self):
         self.session_list.clear()
-        for i, path in enumerate(self.match_data.session_files):
-            label = f"{'reference' if i == self.match_data.ref_index else f'session {i}'}: {self.shorten(path)}"
+        session_files = getattr(self.match_data, 'session_files', [])
+        for i, path in enumerate(session_files):
+            label = f"{'reference' if i == getattr(self.match_data, 'ref_index', -1) else f'session {i}'}: {self.shorten(path)}"
             self.session_list.addItem(label)
 
     def update_status_labels(self):
@@ -544,19 +567,164 @@ class ROIApp(QMainWindow):
         match_data.all_session_mapping = all_matches
         print(f"✅ Finished matching: {len(all_matches)} ROI groups matched.")
 
+    def choose_template_session(self, sessions):
+        """Pick the highest-SNR session as template (std of mean_image)."""
+        best = None
+        best_std = -1.0
+        for s in sessions:
+            img = getattr(s, "mean_image", None)
+            if img is None:
+                continue
+            val = float(np.std(img))
+            if val > best_std:
+                best_std, best = val, s
+        return best or sessions[0]
+
+    def run_full_auto_match(self):
+        """
+        Full automatic matching with no manual alignment.
+        - Computes session->template transforms
+        - Warps mean images and ROI label maps into template space
+        - Runs multi-session grouping
+        - Saves CSV/PKL with UUIDs
+        """
+        try:
+            # --- Sessions source of truth ---
+            sessions = getattr(self.match_data, "rois", [])
+            if len(sessions) < 2:
+                self.statusBar().showMessage("Load ≥2 sessions for full-auto.")
+                return
+
+            # --- Parse IoU threshold from UI safely ---
+            try:
+                iou_min = float(self.overlap_thresh_input.text())
+            except Exception:
+                iou_min = 0.25  # sane default
+
+            # --- Ensure each session has a session_id we can use as a stable key ---
+            #     Prefer a short label from path; fall back to index.
+            session_ids = []
+            for idx, s in enumerate(sessions):
+                if not hasattr(s, "session_id") or not getattr(s, "session_id"):
+                    label = getattr(s, "path", None)
+                    s.session_id = self.shorten(label) if label else f"session_{idx}"
+                session_ids.append(s.session_id)
+
+            # --- Choose template (by SNR) ---
+            template_sess = self.choose_template_session(sessions)
+            template = getattr(template_sess, "mean_image", None)
+            if template is None:
+                QMessageBox.critical(self, "Error", "Template session has no mean_image.")
+                return
+            H, W = template.shape
+
+            # --- Work buffers ---
+            from roimatch_gui.utils.mask_utils import create_cell_id_map
+            labelmaps_reg = {}
+            transforms = {}
+
+            # Progress (N sessions + 1 grouping step)
+            self.progress_start(total=len(sessions) + 1)
+
+            # --- Register each session to the template and expose registered maps ---
+            for s in sessions:
+                mean_img = getattr(s, "mean_image", None)
+                if mean_img is None:
+                    QMessageBox.critical(self, "Error", "A session is missing mean_image; cannot proceed.")
+                    return
+
+                # Build label map in the session’s native space
+                try:
+                    roi_mask_native = create_cell_id_map(s.stat, s.iscell, shape=mean_img.shape)
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to build label map for {s.session_id}:\n{e}")
+                    return
+
+                # Compute transform session->template
+                T = compute_session_transform(mean_img, template, need_nonrigid=True)
+                transforms[s.session_id] = T
+
+                # Expose registered maps for QC and plotting
+                s.meanFrameRegistered = warp_image(mean_img, T, out_shape=(H, W), order=1)
+                s.roiMapRegistered = warp_label_map(roi_mask_native, T, out_shape=(H, W))
+
+                # Use registered label map for matching
+                labelmaps_reg[s.session_id] = s.roiMapRegistered
+
+                self.progress_step(msg=f"Registered {s.session_id}")
+
+            # --- Multi-session grouping ---
+            params = dict(iou_min=iou_min, dmax_px=8.0, area_ratio=(0.5, 2.0))
+            groups = groups_from_all_sessions(labelmaps_reg, params=params)
+            self.progress_step(msg="Built groups")
+
+            # --- Build CSV/PKL with UUID per group; columns are session_ids in GUI order ---
+            rows = []
+            for g in groups:  # g is a dict: {session_id: roi_label, ...}
+                row = {"uuid": str(uuid.uuid4())}
+                for sid in session_ids:
+                    row[sid] = int(g[sid]) if sid in g else -1
+                rows.append(row)
+            df = pd.DataFrame(rows, columns=["uuid"] + session_ids)
+
+            # --- Choose a safe output directory ---
+            if getattr(self.match_data, "output_dir", None):
+                base_dir = Path(self.match_data.output_dir)
+            else:
+                # fall back to parent of first session path
+                first_path = getattr(sessions[0], "path", None)
+                base_dir = Path(first_path).parent if first_path else Path.cwd()
+            out_dir = base_dir / "roimatch_full_auto"
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            csv_path = out_dir / "matches_full_auto.csv"
+            pkl_path = out_dir / "matches_full_auto.pkl"
+            df.to_csv(csv_path, index=False)
+            df.to_pickle(pkl_path)
+
+            # --- Update GUI state ---
+            self.match_data.matched_groups = groups  # list[dict(session_id->roi)]
+            self.match_data.transforms = transforms  # dict(session_id->transform)
+            self.match_data.roiMapRegistered = [s.roiMapRegistered for s in sessions]
+            self.match_data.meanFrameRegistered = [s.meanFrameRegistered for s in sessions]
+
+            self.statusBar().showMessage(f"Full-auto matching done → {csv_path.name}")
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self, "Full Auto Error", f"{e}")
+
 
     def save_uuid_matches(self):
         import pickle
-        import uuid
+        import uuid as _uuid
         import csv
         import os
-        from PyQt5.QtWidgets import QFileDialog, QMessageBox
 
-        if not hasattr(self.match_data, 'all_session_mapping'):
-            QMessageBox.warning(self, "Missing Matches", "No matched ROIs found. Please run Auto-Match first.")
+        # Decide which match structure to use
+        groups = None
+        if getattr(self.match_data, "all_session_mapping", None):
+            groups = self.match_data.all_session_mapping  # list[list or None]
+            structure = "legacy"
+        elif getattr(self.match_data, "matched_groups", None):
+            # Convert dicts -> list aligned to current session order
+            sessions = getattr(self.match_data, "rois", [])
+            session_ids = [getattr(s, "session_id", f"session_{i}") for i, s in enumerate(sessions)]
+            groups = []
+            for g in self.match_data.matched_groups:
+                groups.append([g.get(sid, None) for sid in session_ids])
+            structure = "full_auto"
+        else:
+            QMessageBox.warning(self, "Missing Matches",
+                                "No matched ROIs found. Please run Auto-Match or Full Auto first.")
             return
 
-        session_paths = self.match_data.session_files
+        session_paths = getattr(self.match_data, "session_files", [])
+        if not session_paths:
+            # try to rebuild from ROI objects if needed
+            sessions = getattr(self.match_data, "rois", [])
+            session_paths = [getattr(s, "path", f"session_{i}") for i, s in enumerate(sessions)]
 
         # --- Determine common parent directory for save dialog ---
         try:
@@ -577,37 +745,22 @@ class ROIApp(QMainWindow):
 
         base_path = os.path.splitext(filename)[0]
 
-        # --- Generate UUID-labeled match data ---
-        match_with_uuid = []
-        for group in self.match_data.all_session_mapping:
-            match_with_uuid.append({
-                "uuid": str(uuid.uuid4()),
-                "roi_indices": group,
-                "session_paths": session_paths
-            })
-
         # --- Generate shortened session labels ---
         session_labels = [self.shorten(p) for p in session_paths]
 
-        # --- Save files ---
+        # --- Save CSV ---
         try:
-            # Save as CSV
             csv_path = base_path + ".csv"
             with open(csv_path, "w", newline="") as csvfile:
                 writer = csv.writer(csvfile)
                 writer.writerow(["uuid"] + session_labels)
-                for entry in match_with_uuid:
-                    #writer.writerow([entry["uuid"]] + entry["roi_indices"])
-                    writer.writerow([entry["uuid"]] + [r if r is not None else 'None' for r in entry["roi_indices"]])
-
-            QMessageBox.information(
-                self, "Saved",
-                f"Saved matches to:\n{csv_path}"
-            )
+                for row in groups:
+                    writer.writerow([str(_uuid.uuid4())] + [r if r is not None else 'None' for r in row])
+            QMessageBox.information(self, "Saved", f"Saved matches to:\n{csv_path}")
         except Exception as e:
             QMessageBox.critical(self, "Save Error", f"Could not save matches:\n{str(e)}")
 
-        # --- Also save full GUI state (after match CSV is written) ---
+        # --- Also save GUI state snapshot (optional & best-effort) ---
         try:
             state_path = f"{base_path}_state.pkl"
             save_data = {
@@ -616,7 +769,9 @@ class ROIApp(QMainWindow):
                 "transforms": getattr(self.match_data, "transforms", {}),
                 "roiMapRegistered": getattr(self.match_data, "roiMapRegistered", []),
                 "meanFrameRegistered": getattr(self.match_data, "meanFrameRegistered", []),
+                # Keep original structures to avoid ambiguity on load
                 "all_session_mapping": getattr(self.match_data, "all_session_mapping", []),
+                "matched_groups": getattr(self.match_data, "matched_groups", []),
             }
             with open(state_path, "wb") as f:
                 pickle.dump(save_data, f)
@@ -668,46 +823,64 @@ class ROIApp(QMainWindow):
         self.ax.axis('off')
         self.canvas.draw()
 
+
     def plot_matched_roi_outlines(self):
         """
         Plot outlines of matched ROIs from all sessions, aligned to reference.
-        Uses roiMapRegistered and meanFrameRegistered stored in match_data.
+        Works with either the legacy all_session_mapping or the new matched_groups.
         """
         if not hasattr(self.match_data, 'roiMapRegistered') or not self.match_data.roiMapRegistered:
-            QMessageBox.warning(self, "Missing Data", "No registered ROI maps found. Please run Auto-Match first.")
+            QMessageBox.warning(self, "Missing Data",
+                                "No registered ROI maps found. Please run Auto-Match or Full Auto first.")
             return
 
         self.ax.clear()
 
-        # Plot the reference mean image as background
-        ref_idx = self.match_data.ref_index
+        # Background: registered mean image of the reference session
+        ref_idx = getattr(self.match_data, 'ref_index', 0)
         try:
             mean_img = self.match_data.meanFrameRegistered[ref_idx]
         except (IndexError, AttributeError):
-            QMessageBox.warning(self, "Missing Data", "Reference mean image not found. Please run Auto-Match first.")
+            QMessageBox.warning(self, "Missing Data",
+                                "Reference mean image not found. Please run Auto-Match or Full Auto first.")
             return
+
         vmin, vmax = np.percentile(mean_img, [2, 98])
         self.ax.imshow(mean_img, cmap='gray', vmin=vmin, vmax=vmax)
 
-        # Colors for outlines (avoid red for now to distinguish from GUI marks)
+        # Choose groups source & normalize to list-of-indices aligned to current session order
+        sessions = getattr(self.match_data, "rois", [])
+        session_ids = [getattr(s, "session_id", f"session_{i}") for i, s in enumerate(sessions)]
+
+        if getattr(self.match_data, "all_session_mapping", None):
+            groups_for_plot = self.match_data.all_session_mapping  # list[list or None]
+        elif getattr(self.match_data, "matched_groups", None):
+            groups_for_plot = []
+            for g in self.match_data.matched_groups:  # list[dict(session_id->roi_label)]
+                row = [g.get(sid, None) for sid in session_ids]
+                groups_for_plot.append(row)
+        else:
+            QMessageBox.warning(self, "Missing Data", "No matches found. Run Auto-Match or Full Auto first.")
+            return
+
+        # Colors
         from matplotlib.cm import get_cmap
-        cmap = get_cmap('tab10')
-        n_sessions = len(self.match_data.rois)
-
-        # Draw outlines for each ROI match group
         from skimage.measure import find_contours
+        cmap = get_cmap('tab10')
 
-        for group in self.match_data.all_session_mapping:
-            color = cmap(np.random.randint(0, 10))  # random color per group
-
+        # Draw
+        for group in groups_for_plot:
+            color = cmap(np.random.randint(0, 10))  # random but from a small palette
             for sess_idx, roi_idx in enumerate(group):
-                if roi_idx is None:
+                if roi_idx is None or roi_idx == -1:
                     continue
-
-                label_mask = (self.match_data.roiMapRegistered[sess_idx] == roi_idx).astype(int)
-                contours = find_contours(label_mask, level=0.5)
-
-                for contour in contours:
+                label_map = self.match_data.roiMapRegistered[sess_idx]
+                if label_map is None:
+                    continue
+                label_mask = (label_map == roi_idx).astype(np.uint8)
+                if label_mask.max() == 0:
+                    continue
+                for contour in find_contours(label_mask, level=0.5):
                     self.ax.plot(contour[:, 1], contour[:, 0], color=color, linewidth=1)
 
         self.ax.set_title("Matched ROI Outlines")
