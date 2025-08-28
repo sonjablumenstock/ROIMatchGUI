@@ -198,6 +198,7 @@ class ROIApp(QMainWindow):
         n_sessions = len(self.match_data.rois)
         self.status_sessions_label.setText(f"📁 Sessions loaded: {n_sessions}")
 
+
         # Alignment
         ref_idx = getattr(self.match_data, 'ref_index', None)
         aligned = []
