@@ -76,8 +76,10 @@ class ROIApp(QMainWindow):
 
         full_auto_button = QPushButton("Full Auto (No Manual Alignment)")
         full_auto_button.clicked.connect(self.run_full_auto_match)
-        #self.btn_full_auto = QPushButton("Full Auto (No Manual Alignment)")
-        #self.btn_full_auto.clicked.connect(self.run_full_auto_match)
+        full_auto_button.clicked.connect(self.on_full_auto_clicked)
+
+        qc_button = QPushButton("Full Auto QC")
+        qc_button.clicked.connect(self.show_full_auto_qc)
 
         save_button = QPushButton("Save Matches")
         save_button.clicked.connect(lambda: self.save_uuid_matches())
@@ -123,6 +125,7 @@ class ROIApp(QMainWindow):
         secondary_layout = QHBoxLayout()
         secondary_layout.addWidget(remove_button)
         secondary_layout.addWidget(match_button)
+        secondary_layout.addWidget(qc_button)
         secondary_layout.addWidget(self.overlap_thresh_label)
         secondary_layout.addWidget(self.overlap_thresh_input)
         layout.addLayout(secondary_layout)
@@ -580,6 +583,12 @@ class ROIApp(QMainWindow):
                 best_std, best = val, s
         return best or sessions[0]
 
+    def on_full_auto_clicked(self):
+        self.run_full_auto_match()
+        # if we have groups, draw immediately
+        if getattr(self.match_data, "matched_groups", None) or getattr(self.match_data, "all_session_mapping", None):
+            self.plot_matched_roi_outlines()
+
     def run_full_auto_match(self):
         """
         Full automatic matching with no manual alignment.
@@ -612,6 +621,7 @@ class ROIApp(QMainWindow):
 
             # --- Choose template (by SNR) ---
             template_sess = self.choose_template_session(sessions)
+            self.match_data.template_index = sessions.index(template_sess)  # <-- add this line
             template = getattr(template_sess, "mean_image", None)
             if template is None:
                 QMessageBox.critical(self, "Error", "Template session has no mean_image.")
@@ -823,68 +833,205 @@ class ROIApp(QMainWindow):
         self.ax.axis('off')
         self.canvas.draw()
 
-
     def plot_matched_roi_outlines(self):
         """
-        Plot outlines of matched ROIs from all sessions, aligned to reference.
-        Works with either the legacy all_session_mapping or the new matched_groups.
+        Plot matched ROI outlines in the correct common space.
+
+        Background is chosen as:
+          - Full Auto:   self.match_data.template_index (template session)
+          - Manual flow: self.match_data.ref_index (user-chosen reference)
+          - Fallback:    0
+        Works with either:
+          - legacy self.match_data.all_session_mapping (list of lists)
+          - new     self.match_data.matched_groups     (list of dicts: session_id -> roi label)
         """
-        if not hasattr(self.match_data, 'roiMapRegistered') or not self.match_data.roiMapRegistered:
+        # Need registered maps & means
+        if not getattr(self.match_data, "roiMapRegistered", None) or not getattr(self.match_data, "meanFrameRegistered",
+                                                                                 None):
             QMessageBox.warning(self, "Missing Data",
-                                "No registered ROI maps found. Please run Auto-Match or Full Auto first.")
+                                "No registered ROI maps found. Run Auto-Match or Full Auto first.")
             return
 
-        self.ax.clear()
-
-        # Background: registered mean image of the reference session
-        ref_idx = getattr(self.match_data, 'ref_index', 0)
-        try:
-            mean_img = self.match_data.meanFrameRegistered[ref_idx]
-        except (IndexError, AttributeError):
-            QMessageBox.warning(self, "Missing Data",
-                                "Reference mean image not found. Please run Auto-Match or Full Auto first.")
-            return
-
-        vmin, vmax = np.percentile(mean_img, [2, 98])
-        self.ax.imshow(mean_img, cmap='gray', vmin=vmin, vmax=vmax)
-
-        # Choose groups source & normalize to list-of-indices aligned to current session order
         sessions = getattr(self.match_data, "rois", [])
-        session_ids = [getattr(s, "session_id", f"session_{i}") for i, s in enumerate(sessions)]
+        if not sessions:
+            QMessageBox.warning(self, "Missing Data", "No sessions loaded.")
+            return
 
+        # --- Choose background index: prefer template_index (Full Auto), else ref_index (manual), else 0
+        bg_idx = getattr(self.match_data, "template_index", None)
+        if bg_idx is None:
+            bg_idx = getattr(self.match_data, "ref_index", 0)
+        bg_idx = 0 if bg_idx is None else int(bg_idx)
+
+        # --- Get background image (registered mean)
+        try:
+            mean_img = self.match_data.meanFrameRegistered[bg_idx]
+        except Exception:
+            QMessageBox.warning(self, "Missing Data",
+                                "Background mean image not found. Run Auto-Match or Full Auto first.")
+            return
+
+        # --- Normalize match groups to list-of-indices aligned to current session order
+        session_ids = [getattr(s, "session_id", f"session_{i}") for i, s in enumerate(sessions)]
         if getattr(self.match_data, "all_session_mapping", None):
-            groups_for_plot = self.match_data.all_session_mapping  # list[list or None]
+            groups_for_plot = self.match_data.all_session_mapping  # legacy list[list or None]
         elif getattr(self.match_data, "matched_groups", None):
             groups_for_plot = []
-            for g in self.match_data.matched_groups:  # list[dict(session_id->roi_label)]
-                row = [g.get(sid, None) for sid in session_ids]
-                groups_for_plot.append(row)
+            for g in self.match_data.matched_groups:  # dict(session_id -> roi_label)
+                groups_for_plot.append([g.get(sid, None) for sid in session_ids])
         else:
             QMessageBox.warning(self, "Missing Data", "No matches found. Run Auto-Match or Full Auto first.")
             return
 
-        # Colors
+        # --- Draw
+        self.ax.clear()
+        vmin, vmax = np.percentile(mean_img, [2, 98])
+        self.ax.imshow(mean_img, cmap='gray', vmin=vmin, vmax=vmax)
+
         from matplotlib.cm import get_cmap
         from skimage.measure import find_contours
         cmap = get_cmap('tab10')
 
-        # Draw
-        for group in groups_for_plot:
-            color = cmap(np.random.randint(0, 10))  # random but from a small palette
+        for group in groups_for_plot:  # each group aligns to session order
+            color = cmap(np.random.randint(0, 10))
             for sess_idx, roi_idx in enumerate(group):
                 if roi_idx is None or roi_idx == -1:
                     continue
                 label_map = self.match_data.roiMapRegistered[sess_idx]
                 if label_map is None:
                     continue
-                label_mask = (label_map == roi_idx).astype(np.uint8)
-                if label_mask.max() == 0:
+                mask = (label_map == roi_idx).astype(np.uint8)
+                if mask.max() == 0:
                     continue
-                for contour in find_contours(label_mask, level=0.5):
+                for contour in find_contours(mask, level=0.5):
                     self.ax.plot(contour[:, 1], contour[:, 0], color=color, linewidth=1)
 
         self.ax.set_title("Matched ROI Outlines")
         self.ax.axis('off')
+        self.canvas.draw()
+
+    # def plot_matched_roi_outlines(self):
+    #     """
+    #     Plot outlines of matched ROIs from all sessions, aligned to reference.
+    #     Works with either the legacy all_session_mapping or the new matched_groups.
+    #     """
+    #     if not hasattr(self.match_data, 'roiMapRegistered') or not self.match_data.roiMapRegistered:
+    #         QMessageBox.warning(self, "Missing Data",
+    #                             "No registered ROI maps found. Please run Auto-Match or Full Auto first.")
+    #         return
+    #
+    #     self.ax.clear()
+    #
+    #     # Background: registered mean image of the reference session
+    #     ref_idx = getattr(self.match_data, 'ref_index', 0)
+    #     try:
+    #         mean_img = self.match_data.meanFrameRegistered[ref_idx]
+    #     except (IndexError, AttributeError):
+    #         QMessageBox.warning(self, "Missing Data",
+    #                             "Reference mean image not found. Please run Auto-Match or Full Auto first.")
+    #         return
+    #
+    #     vmin, vmax = np.percentile(mean_img, [2, 98])
+    #     self.ax.imshow(mean_img, cmap='gray', vmin=vmin, vmax=vmax)
+    #
+    #     # Choose groups source & normalize to list-of-indices aligned to current session order
+    #     sessions = getattr(self.match_data, "rois", [])
+    #     session_ids = [getattr(s, "session_id", f"session_{i}") for i, s in enumerate(sessions)]
+    #
+    #     if getattr(self.match_data, "all_session_mapping", None):
+    #         groups_for_plot = self.match_data.all_session_mapping  # list[list or None]
+    #     elif getattr(self.match_data, "matched_groups", None):
+    #         groups_for_plot = []
+    #         for g in self.match_data.matched_groups:  # list[dict(session_id->roi_label)]
+    #             groups_for_plot.append([g.get(sid, None) for sid in session_ids])
+    #     else:
+    #         QMessageBox.warning(self, "Missing Data", "No matches found. Run Auto-Match or Full Auto first.")
+    #         return
+    #
+    #     from matplotlib.cm import get_cmap
+    #     from skimage.measure import find_contours
+    #     cmap = get_cmap('tab10')
+    #
+    #     for group in groups_for_plot:  # <-- use groups_for_plot (bug fix)
+    #         color = cmap(np.random.randint(0, 10))
+    #         for sess_idx, roi_idx in enumerate(group):
+    #             if roi_idx is None or roi_idx == -1:
+    #                 continue
+    #             label_map = self.match_data.roiMapRegistered[sess_idx]
+    #             if label_map is None:
+    #                 continue
+    #             label_mask = (label_map == roi_idx).astype(np.uint8)
+    #             if label_mask.max() == 0:
+    #                 continue
+    #             for contour in find_contours(label_mask, level=0.5):
+    #                 self.ax.plot(contour[:, 1], contour[:, 0], color=color, linewidth=1)
+    #
+    #     self.ax.set_title("Matched ROI Outlines")
+    #     self.ax.axis('off')
+    #     self.canvas.draw()
+
+
+
+
+    def show_full_auto_qc(self):
+        """
+        Compute IoU of each matched ROI vs the reference session and show a histogram.
+        Works with either all_session_mapping or matched_groups.
+        """
+        # Need registered maps
+        if not hasattr(self.match_data, 'roiMapRegistered') or not self.match_data.roiMapRegistered:
+            QMessageBox.warning(self, "Missing Data", "No registered ROI maps found. Run Full Auto first.")
+            return
+
+        sessions = getattr(self.match_data, "rois", [])
+        if not sessions:
+            QMessageBox.warning(self, "Missing Data", "No sessions loaded.")
+            return
+
+        ref_idx = getattr(self.match_data, 'ref_index', 0)
+        ref_map = self.match_data.roiMapRegistered[ref_idx]
+
+        # Normalize groups
+        session_ids = [getattr(s, "session_id", f"session_{i}") for i, s in enumerate(sessions)]
+        if getattr(self.match_data, "all_session_mapping", None):
+            groups_for_plot = self.match_data.all_session_mapping
+        elif getattr(self.match_data, "matched_groups", None):
+            groups_for_plot = []
+            for g in self.match_data.matched_groups:
+                groups_for_plot.append([g.get(sid, None) for sid in session_ids])
+        else:
+            QMessageBox.warning(self, "Missing Data", "No matches found. Run Auto-Match or Full Auto first.")
+            return
+
+        def iou(mask_a, mask_b):
+            inter = np.logical_and(mask_a, mask_b).sum()
+            union = np.logical_or(mask_a, mask_b).sum()
+            return float(inter) / float(union) if union > 0 else 0.0
+
+        # Collect IoUs against reference
+        ious = []
+        for group in groups_for_plot:
+            ref_roi = group[ref_idx]
+            if ref_roi is None or ref_roi == -1:
+                continue
+            ref_mask = (ref_map == ref_roi)
+            for sess_idx, roi_idx in enumerate(group):
+                if sess_idx == ref_idx or roi_idx in (None, -1):
+                    continue
+                m = (self.match_data.roiMapRegistered[sess_idx] == roi_idx)
+                ious.append(iou(ref_mask, m))
+
+        # Plot histogram in the main canvas
+        self.ax.clear()
+        if len(ious) == 0:
+            self.ax.text(0.5, 0.5, "No IoUs to plot (no groups overlap with reference).",
+                         ha='center', va='center')
+        else:
+            self.ax.hist(ious, bins=20)
+            self.ax.set_xlabel("IoU vs Reference")
+            self.ax.set_ylabel("# of matches")
+            self.ax.set_title(f"Full Auto QC: IoU to reference (n={len(ious)})\n"
+                              f"median={np.median(ious):.2f}, mean={np.mean(ious):.2f}")
         self.canvas.draw()
 
     def reset_all(self):
