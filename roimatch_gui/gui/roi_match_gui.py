@@ -665,6 +665,7 @@ class ROIApp(QMainWindow):
                     QMessageBox.critical(self, "Error", f"Failed to build label map for {s.session_id}:\n{e}")
                     return
 
+
                 # Compute transform session->template
                 T = compute_session_transform(mean_img, template, need_nonrigid=False)
                 transforms[s.session_id] = T
