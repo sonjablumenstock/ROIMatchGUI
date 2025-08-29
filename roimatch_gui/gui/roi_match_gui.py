@@ -25,16 +25,18 @@ from .registration_auto import (
 )
 from .matcher_auto import groups_from_all_sessions
 
-
-
-# def mean_from_ops(s2p_folder: str):
-#     ops_path = Path(s2p_folder) / "ops.npy"
-#     ops = np.load(ops_path, allow_pickle=True).item()
-#     mean_img = ops["meanImg"]  # minimal: assume it exists
-#     # ensure 2D float32
-#     mean_img = np.asarray(mean_img, dtype=np.float32)
-#     assert mean_img.ndim == 2, "ops['meanImg'] must be 2D"
-#     return mean_img
+def _is_invertible_transform(tform, det_eps=1e-8, cond_max=1e8):
+    """Return True if tform.params is finite and the 2x2 Jacobian is invertible+well-conditioned."""
+    try:
+        P = getattr(tform, "params", None)
+        if P is None or P.shape != (3, 3) or not np.isfinite(P).all():
+            return False
+        J = P[:2, :2]
+        d = np.linalg.det(J)
+        c = np.linalg.cond(J)
+        return (abs(d) > det_eps) and (c < cond_max)
+    except Exception:
+        return False
 
 def launch_gui():
     app = QApplication(sys.argv)
@@ -76,7 +78,7 @@ class ROIApp(QMainWindow):
 
         auto_match_button = QPushButton("Auto-Match All Sessions")
         auto_match_button.clicked.connect(self.auto_match_rois)
-        auto_match_button.clicked.connect(self.plot_matched_roi_outlines)
+        #auto_match_button.clicked.connect(self.plot_matched_roi_outlines)
 
         full_auto_button = QPushButton("Full Auto (No Manual Alignment)")
         full_auto_button.clicked.connect(self.on_full_auto_clicked)
@@ -155,7 +157,8 @@ class ROIApp(QMainWindow):
 
     def shorten(self, path):
         parts = os.path.normpath(path).split(os.sep)
-        return "_".join(parts[-5:-2])
+        s = "_".join(parts[-5:-2])
+        return s if s else Path(path).name
 
     def progress_start(self, total):
         # e.g., QProgressDialog or status text with a counter
@@ -194,10 +197,13 @@ class ROIApp(QMainWindow):
         missing = []
 
         if ref_idx is not None:
+            transforms = getattr(self.match_data, 'transforms', {})
             for i in range(n_sessions):
                 if i == ref_idx:
                     continue
-                if (ref_idx, i) in getattr(self.match_data, 'transforms', {}):
+                key = (ref_idx, i)
+                t = transforms.get(key, None)
+                if t is not None and _is_invertible_transform(t):
                     aligned.append(i)
                 else:
                     missing.append(i)
@@ -377,6 +383,7 @@ class ROIApp(QMainWindow):
                 self.match_data.transforms = {}
 
             self.match_data.transforms[(self.match_data.ref_index, idx)] = tform
+            self.update_status_labels()
             session_label = self.session_list.item(idx).text()
             QMessageBox.information(self, "Transform",
                                     f"Alignment of {session_label} to reference completed and transform stored.")
@@ -387,19 +394,6 @@ class ROIApp(QMainWindow):
         self.point_match_window = PointMatchWindow(ref_exp.mean_image, mov_exp.mean_image, callback=on_points_selected)
         self.point_match_window.show()
 
-    # def add_experiment(self):
-    #     folder = QFileDialog.getExistingDirectory(self, "Select Suite2p Folder", "./data")
-    #     if not folder:
-    #         return
-    #     exp = load_suite2p_experiment(folder)
-    #     self.match_data.rois.append(exp)
-    #
-    #     # Add to list view
-    #     self.exp_list.addItem(folder)
-    #
-    #     # Set reference image if first one
-    #     if len(self.match_data.rois) == 1:
-    #         self.match_data.ref_image = exp.mean_image
 
     def match_selected_experiments(self):
         if len(self.match_data.rois) < 2:
@@ -471,6 +465,7 @@ class ROIApp(QMainWindow):
         self.run_automatic_matching(self.match_data, overlap_threshold=overlap_thresh)
         QMessageBox.information(self, "Auto-Matching Complete",
                                 f"Matched {len(self.match_data.all_session_mapping)} ROI groups.")
+        self.plot_matched_roi_outlines()
 
     def run_automatic_matching(self, match_data, overlap_threshold=0.2):
         """
@@ -719,7 +714,7 @@ class ROIApp(QMainWindow):
 
             # --- Update GUI state ---
             self.match_data.matched_groups = groups  # list[dict(session_id->roi)]
-            self.match_data.transforms = transforms  # dict(session_id->transform)
+            self.match_data.full_auto_transforms = transforms  # dict(session_id->transform)
             self.match_data.roiMapRegistered = [s.roiMapRegistered for s in sessions]
             self.match_data.meanFrameRegistered = [s.meanFrameRegistered for s in sessions]
 
@@ -731,121 +726,6 @@ class ROIApp(QMainWindow):
             QMessageBox.critical(self, "Full Auto Error", f"{e}")
 
 
-    # def align_selected_session_by_constellation(self):
-    #     from skimage.transform import warp as _skwarp
-    #     """
-    #     Align ALL loaded sessions to the current reference using ROI-constellation alignment,
-    #     store transforms and registered maps, then run auto-match across sessions.
-    #     """
-    #     # Preconditions
-    #     if not getattr(self.match_data, "rois", None) or len(self.match_data.rois) < 2:
-    #         QMessageBox.warning(self, "Need Sessions", "Load at least two sessions first.")
-    #         return
-    #     ref_idx = getattr(self.match_data, "ref_index", None)
-    #     if ref_idx is None or ref_idx < 0:
-    #         QMessageBox.warning(self, "No Reference", "Set a reference session first.")
-    #         return
-    #
-    #     try:
-    #         sessions = self.match_data.rois
-    #         n_sessions = len(sessions)
-    #         ref_sess = sessions[ref_idx]
-    #         ref_shape = getattr(ref_sess, "mean_image", None).shape
-    #
-    #         # Containers in the expected format
-    #         self.match_data.transforms = getattr(self.match_data, "transforms", {})
-    #         self.match_data.roiMapRegistered = [None] * n_sessions
-    #         self.match_data.meanFrameRegistered = [None] * n_sessions
-    #
-    #         # Reference goes in as-is
-    #         self.match_data.roiMapRegistered[ref_idx] = create_cell_id_map(
-    #             ref_sess.stat, ref_sess.iscell, shape=ref_shape
-    #         )
-    #         self.match_data.meanFrameRegistered[ref_idx] = ref_sess.mean_image
-    #
-    #         # Align every non-ref session using constellation
-    #         failures = []
-    #         for i, mov_sess in enumerate(sessions):
-    #             if i == ref_idx:
-    #                 continue
-    #
-    #             T, info = compute_session_transform_constellation(ref_sess, mov_sess)
-    #             if T is None:
-    #                 failures.append((i, (info or {}).get("reason", "unknown")))
-    #                 continue
-    #
-    #             # Persist transform under (ref_idx, i) (this is what the rest of the app expects)
-    #             self.match_data.transforms[(ref_idx, i)] = T
-    #
-    #             # Build native label map, then warp into reference space
-    #             lbl_mov_native = create_cell_id_map(
-    #                 mov_sess.stat, mov_sess.iscell, shape=mov_sess.mean_image.shape
-    #             )
-    #             # lbl_mov_reg = warp_label_map(lbl_mov_native, T, out_shape=ref_shape)
-    #             # self.match_data.roiMapRegistered[i] = lbl_mov_reg
-    #             #
-    #             # # Registered mean (for plotting)
-    #             # try:
-    #             #     mean_reg = warp_image(mov_sess.mean_image, T, out_shape=ref_shape, order=1)
-    #             #     self.match_data.meanFrameRegistered[i] = mean_reg
-    #             # except Exception:
-    #             #     pass
-    #
-    #             lbl_mov_reg = _skwarp(
-    #                 lbl_mov_native,
-    #                 inverse_map=T.inverse,
-    #                 output_shape=ref_shape,
-    #                 order=0,
-    #                 preserve_range=True,
-    #             ).astype(np.int32)
-    #             self.match_data.roiMapRegistered[i] = lbl_mov_reg
-    #
-    #             # Mean image (linear)
-    #             try:
-    #                 mean_reg = _skwarp(
-    #                     mov_sess.mean_image,
-    #                     inverse_map=T.inverse,
-    #                     output_shape=ref_shape,
-    #                     order=1,
-    #                     preserve_range=True,
-    #                 ).astype(np.float32)
-    #                 self.match_data.meanFrameRegistered[i] = mean_reg
-    #             except Exception:
-    #                 pass
-    #
-    #         # UI / status
-    #         if failures:
-    #             msg = "\n".join([f"session {idx}: {reason}" for idx, reason in failures])
-    #             QMessageBox.warning(self, "Some sessions failed to align (constellation)", msg)
-    #
-    #         # Kick off auto-match across all registered maps
-    #         try:
-    #             overlap_thresh = float(self.overlap_thresh_input.text())
-    #         except ValueError:
-    #             overlap_thresh = 0.2
-    #
-    #         self.run_automatic_matching(self.match_data, overlap_threshold=overlap_thresh)
-    #
-    #         # Feedback
-    #         n_groups = len(getattr(self.match_data, "all_session_mapping", []) or [])
-    #         self.status_alignment_label.setText(
-    #             f"Constellation aligned {n_sessions - 1 - len(failures)}/{n_sessions - 1} sessions · "
-    #             f"auto-matched groups: {n_groups}"
-    #         )
-    #         QMessageBox.information(
-    #             self, "Done",
-    #             f"Aligned (constellation) and auto-matched.\n"
-    #             f"Aligned: {n_sessions - 1 - len(failures)}/{n_sessions - 1}\n"
-    #             f"Groups: {n_groups}"
-    #         )
-    #
-    #         # Update displays/status
-    #         self.update_status_labels()
-    #         if hasattr(self, "refresh_registered_preview"):
-    #             self.refresh_registered_preview()
-    #
-    #     except Exception as e:
-    #         QMessageBox.critical(self, "Error during Constellation Alignment", str(e))
 
     def align_selected_session_by_constellation(self):
         """
@@ -881,27 +761,36 @@ class ROIApp(QMainWindow):
             successes, failures = [], []
 
             # Constellation-align every non-ref session
+            # Constellation-align every non-ref session
             from skimage.transform import warp as _skwarp
             for i, mov_sess in enumerate(sessions):
                 if i == ref_idx:
                     continue
 
-                T, info = compute_session_transform_constellation(ref_sess, mov_sess)
-                if T is None:
-                    failures.append((i, (info or {}).get("reason", "unknown")))
+                # ⛔ Skip empties early (no attempt to align)
+                try:
+                    native_lbl = create_cell_id_map(mov_sess.stat, mov_sess.iscell, shape=mov_sess.mean_image.shape)
+                except Exception:
+                    native_lbl = None
+                if native_lbl is None or (hasattr(native_lbl, "max") and native_lbl.max() == 0):
+                    failures.append((i, "empty_mask"))
                     continue
 
-                # Persist transform under (ref_idx, i) so status panel recognizes it
+                T, info = compute_session_transform_constellation(ref_sess, mov_sess)
+
+                # ⛔ Reject missing/degenerate transforms
+                if T is None or not _is_invertible_transform(T):
+                    failures.append((i, (info or {}).get("reason", "degenerate_or_failed")))
+                    continue
+
+                # ✅ Persist (ref_idx, i)
                 self.match_data.transforms[(ref_idx, i)] = T
                 successes.append((i, (info or {}).get("model", "similarity")))
 
-                # (Optional) build registered maps for visualization
+                # (Optional) preview maps — best effort
                 try:
-                    lbl_mov_native = create_cell_id_map(
-                        mov_sess.stat, mov_sess.iscell, shape=mov_sess.mean_image.shape
-                    )
                     lbl_mov_reg = _skwarp(
-                        lbl_mov_native, inverse_map=T.inverse, output_shape=ref_shape,
+                        native_lbl, inverse_map=T.inverse, output_shape=ref_shape,
                         order=0, preserve_range=True
                     ).astype(np.int32)
                     self.match_data.roiMapRegistered[i] = lbl_mov_reg
@@ -912,7 +801,6 @@ class ROIApp(QMainWindow):
                     ).astype(np.float32)
                     self.match_data.meanFrameRegistered[i] = mean_reg
                 except Exception:
-                    # Visualization is best-effort; alignment success still counts
                     pass
 
             # Update status panel and show a summary
