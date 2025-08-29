@@ -4,8 +4,27 @@ import numpy as np
 import cv2
 from skimage.registration import phase_cross_correlation, optical_flow_tvl1
 from scipy.ndimage import map_coordinates, gaussian_filter
+from ..utils.alignment_constellation import align_by_roi_constellation
+from ..utils.mask_utils import create_cell_id_map
 
 # ---------- helpers (module scope) ----------
+def compute_session_transform_constellation(ref_session, mov_session, model='similarity',
+                                            k=5, fp_tol=3.0, cutoff=8.0):
+    """
+    Compute geometric transform from mov_session -> ref_session using ROI constellations.
+    Returns (TransformObject, info_dict) or (None, {'reason': ...})
+    """
+    # Use each session's native mean image size for its label map
+    ref_shape = getattr(ref_session, "mean_image", None).shape
+    mov_shape = getattr(mov_session, "mean_image", None).shape
+
+    lbl_ref = create_cell_id_map(ref_session.stat, ref_session.iscell, shape=ref_shape)
+    lbl_mov = create_cell_id_map(mov_session.stat, mov_session.iscell, shape=mov_shape)
+
+    T, info = align_by_roi_constellation(lbl_ref, lbl_mov, k=k, fp_tol=fp_tol, cutoff=cutoff, model=model)
+    return T, info
+
+
 def _as_gray_uint8(img):
     """Return a 2D uint8 grayscale image (0..255) for OpenCV."""
     img = np.asarray(img)
