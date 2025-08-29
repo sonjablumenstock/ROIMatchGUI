@@ -22,22 +22,21 @@ from .matcher_auto import groups_from_all_sessions
 
 
 
+# def mean_from_ops(s2p_folder: str):
+#     ops_path = Path(s2p_folder) / "ops.npy"
+#     ops = np.load(ops_path, allow_pickle=True).item()
+#     mean_img = ops["meanImg"]  # minimal: assume it exists
+#     # ensure 2D float32
+#     mean_img = np.asarray(mean_img, dtype=np.float32)
+#     assert mean_img.ndim == 2, "ops['meanImg'] must be 2D"
+#     return mean_img
+
 def launch_gui():
     app = QApplication(sys.argv)
     window = ROIApp()
     window.show()
     sys.exit(app.exec_())
 
-class DraggableSessionList(QListWidget):
-    def __init__(self, parent=None, on_reorder_callback=None):
-        super().__init__(parent)
-        self.on_reorder_callback = on_reorder_callback
-        self.setDragDropMode(QListWidget.InternalMove)
-
-    def dropEvent(self, event):
-        super().dropEvent(event)
-        if self.on_reorder_callback:
-            self.on_reorder_callback()
 
 class ROIApp(QMainWindow):
     def __init__(self):
@@ -75,7 +74,7 @@ class ROIApp(QMainWindow):
         auto_match_button.clicked.connect(self.plot_matched_roi_outlines)
 
         full_auto_button = QPushButton("Full Auto (No Manual Alignment)")
-        full_auto_button.clicked.connect(self.run_full_auto_match)
+        #full_auto_button.clicked.connect(self.run_full_auto_match)
         full_auto_button.clicked.connect(self.on_full_auto_clicked)
 
         qc_button = QPushButton("Full Auto QC")
@@ -379,19 +378,19 @@ class ROIApp(QMainWindow):
         self.point_match_window = PointMatchWindow(ref_exp.mean_image, mov_exp.mean_image, callback=on_points_selected)
         self.point_match_window.show()
 
-    def add_experiment(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Suite2p Folder", "./data")
-        if not folder:
-            return
-        exp = load_suite2p_experiment(folder)
-        self.match_data.rois.append(exp)
-
-        # Add to list view
-        self.exp_list.addItem(folder)
-
-        # Set reference image if first one
-        if len(self.match_data.rois) == 1:
-            self.match_data.ref_image = exp.mean_image
+    # def add_experiment(self):
+    #     folder = QFileDialog.getExistingDirectory(self, "Select Suite2p Folder", "./data")
+    #     if not folder:
+    #         return
+    #     exp = load_suite2p_experiment(folder)
+    #     self.match_data.rois.append(exp)
+    #
+    #     # Add to list view
+    #     self.exp_list.addItem(folder)
+    #
+    #     # Set reference image if first one
+    #     if len(self.match_data.rois) == 1:
+    #         self.match_data.ref_image = exp.mean_image
 
     def match_selected_experiments(self):
         if len(self.match_data.rois) < 2:
@@ -619,13 +618,29 @@ class ROIApp(QMainWindow):
                     s.session_id = self.shorten(label) if label else f"session_{idx}"
                 session_ids.append(s.session_id)
 
-            # --- Choose template (by SNR) ---
-            template_sess = self.choose_template_session(sessions)
-            self.match_data.template_index = sessions.index(template_sess)  # <-- add this line
+            # # --- Choose template (by SNR) ---
+            # template_sess = self.choose_template_session(sessions)
+            # self.match_data.template_index = sessions.index(template_sess)  # <-- add this line
+            # template = getattr(template_sess, "mean_image", None)
+            # if template is None:
+            #     QMessageBox.critical(self, "Error", "Template session has no mean_image.")
+            #     return
+            # H, W = template.shape
+
+            # --- Choose template session ---
+            ref_idx = getattr(self.match_data, "ref_index", None)
+            if ref_idx is not None and 0 <= ref_idx < len(sessions):
+                template_sess = sessions[ref_idx]  # <-- prefer user's reference
+            else:
+                template_sess = self.choose_template_session(sessions)  # fallback: highest SNR
+
             template = getattr(template_sess, "mean_image", None)
             if template is None:
                 QMessageBox.critical(self, "Error", "Template session has no mean_image.")
                 return
+
+            # store for plotting/QC
+            self.match_data.template_index = sessions.index(template_sess)
             H, W = template.shape
 
             # --- Work buffers ---
@@ -651,7 +666,7 @@ class ROIApp(QMainWindow):
                     return
 
                 # Compute transform session->template
-                T = compute_session_transform(mean_img, template, need_nonrigid=True)
+                T = compute_session_transform(mean_img, template, need_nonrigid=False)
                 transforms[s.session_id] = T
 
                 # Expose registered maps for QC and plotting
@@ -832,6 +847,7 @@ class ROIApp(QMainWindow):
         self.ax.set_title("Mean Image + ROIs (iscell only)")
         self.ax.axis('off')
         self.canvas.draw()
+
 
     def plot_matched_roi_outlines(self):
         """
