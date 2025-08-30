@@ -8,6 +8,13 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget, QPushButton,
     QFileDialog, QListWidget, QHBoxLayout, QMessageBox, QLineEdit
 )
+from PyQt5.QtWidgets import (
+    QDialog, QFormLayout, QComboBox, QSpinBox, QDoubleSpinBox,
+    QDialogButtonBox, QToolButton, QCheckBox
+)
+from PyQt5.QtGui import QIcon
+from PyQt5.QtCore import Qt
+
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from roimatch_gui.utils.loader import load_suite2p_experiment
@@ -84,9 +91,24 @@ class ROIApp(QMainWindow):
         full_auto_button.clicked.connect(self.on_full_auto_clicked)
 
         # --- New button: Align by ROI Constellation ---
+        # defaults (store on the window so they're easy to reuse)
+        self.constellation_params = {
+            'model': 'similarity',
+            'k': 5,
+            'fp_tol': 0.25,  # set to None for Auto
+            'cutoff': 8.0,  # set to None for Auto
+        }
         btn_align_const = QPushButton("Align by ROI Constellation")
         btn_align_const.setToolTip("Estimate transform from ROI centroids (robust to mean-image contrast)")
         btn_align_const.clicked.connect(self.align_selected_session_by_constellation)
+        btn_align_const.clicked.connect(self.align_selected_session_by_constellation)
+
+        # small gear button to open settings
+        btn_align_const_settings = QToolButton(self)
+        btn_align_const_settings.setText("⚙")  # or use an icon if you prefer
+        btn_align_const_settings.setToolTip("Constellation alignment settings")
+        btn_align_const_settings.clicked.connect(self.open_constellation_settings)
+
 
         qc_button = QPushButton("Full Auto QC")
         qc_button.clicked.connect(self.show_full_auto_qc)
@@ -120,6 +142,7 @@ class ROIApp(QMainWindow):
         workflow_btn_layout.addWidget(auto_match_button)
         workflow_btn_layout.addWidget(full_auto_button)
         workflow_btn_layout.addWidget(btn_align_const)
+        workflow_btn_layout.addWidget(btn_align_const_settings)
         workflow_btn_layout.addWidget(save_button)
         workflow_btn_layout.addWidget(show_matches_button)
         layout.addLayout(workflow_btn_layout)
@@ -214,6 +237,37 @@ class ROIApp(QMainWindow):
             )
         else:
             self.status_alignment_label.setText("📐 Alignment status: n/a (no reference set)")
+
+    def open_constellation_settings(self):
+        dlg = ConstellationParamsDialog(self, params=self.constellation_params)
+        if dlg.exec_() == QDialog.Accepted:
+            self.constellation_params = dlg.values()
+            # Optional: give quick feedback
+            fp_str = "auto" if self.constellation_params[
+                                   'fp_tol'] is None else f"{self.constellation_params['fp_tol']:.3f}"
+            cut_str = "auto" if self.constellation_params[
+                                    'cutoff'] is None else f"{self.constellation_params['cutoff']:.2f}"
+            self.status_alignment_label.setText(
+                f"Constellation settings → model={self.constellation_params['model']}, "
+                f"k={self.constellation_params['k']}, fp_tol={fp_str}, cutoff={cut_str}"
+            )
+
+    def align_selected_session_by_constellation(self):
+        # ... your existing prechecks (ref set, session selected, etc.)
+
+        ref_sess = self.match_data.rois[ref_idx]
+        mov_sess = self.match_data.rois[mov_idx]
+
+        from roimatch_gui.utils.registration_auto import compute_session_transform_constellation, warp_label_map, \
+            warp_image
+        p = self.constellation_params
+        T, info = compute_session_transform_constellation(
+            ref_sess, mov_sess,
+            model=p.get('model', 'similarity'),
+            k=int(p.get('k', 5)),
+            fp_tol=p.get('fp_tol', 0.25),
+            cutoff=p.get('cutoff', 8.0),
+        )
 
     def load_session_state(self):
         import pickle
@@ -1113,6 +1167,64 @@ class ROIApp(QMainWindow):
 
             #QMessageBox.information(self, "Reset Complete", "All sessions and matches have been cleared.")
 
+
+class ConstellationParamsDialog(QDialog):
+    def __init__(self, parent=None, params=None):
+        super().__init__(parent)
+        self.setWindowTitle("ROI Constellation Alignment – Settings")
+        self.setModal(True)
+
+        p = params or {}
+        model = p.get('model', 'similarity')
+        k_val = int(p.get('k', 5))
+        fp_tol = p.get('fp_tol', 0.25)   # None means Auto
+        cutoff = p.get('cutoff', 8.0)    # None means Auto
+
+        form = QFormLayout(self)
+
+        self.model_combo = QComboBox(self)
+        self.model_combo.addItems(['similarity', 'affine'])
+        self.model_combo.setCurrentText(model)
+        form.addRow("Model", self.model_combo)
+
+        self.k_spin = QSpinBox(self); self.k_spin.setRange(2, 20)
+        self.k_spin.setValue(k_val)
+        form.addRow("k (neighbors)", self.k_spin)
+
+        # fp_tol with "Auto" checkbox
+        self.fp_auto = QCheckBox("Auto"); self.fp_auto.setChecked(fp_tol is None)
+        self.fp_spin = QDoubleSpinBox(self); self.fp_spin.setDecimals(3)
+        self.fp_spin.setRange(0.05, 1.0); self.fp_spin.setSingleStep(0.01)
+        self.fp_spin.setValue(0.25 if fp_tol is None else float(fp_tol))
+        self.fp_spin.setEnabled(not self.fp_auto.isChecked())
+        fp_row = QWidget(self); fp_layout = QHBoxLayout(fp_row); fp_layout.setContentsMargins(0,0,0,0)
+        fp_layout.addWidget(self.fp_spin); fp_layout.addWidget(self.fp_auto)
+        form.addRow("Fingerprint tol (L1)", fp_row)
+        self.fp_auto.toggled.connect(lambda s: self.fp_spin.setEnabled(not s))
+
+        # cutoff with "Auto" checkbox
+        self.cut_auto = QCheckBox("Auto"); self.cut_auto.setChecked(cutoff is None)
+        self.cut_spin = QDoubleSpinBox(self); self.cut_spin.setDecimals(2)
+        self.cut_spin.setRange(1.0, 100.0); self.cut_spin.setSingleStep(0.5)
+        self.cut_spin.setValue(8.0 if cutoff is None else float(cutoff))
+        self.cut_spin.setEnabled(not self.cut_auto.isChecked())
+        cut_row = QWidget(self); cut_layout = QHBoxLayout(cut_row); cut_layout.setContentsMargins(0,0,0,0)
+        cut_layout.addWidget(self.cut_spin); cut_layout.addWidget(self.cut_auto)
+        form.addRow("ICP cutoff (px)", cut_row)
+        self.cut_auto.toggled.connect(lambda s: self.cut_spin.setEnabled(not s))
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=self)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def values(self):
+        return {
+            'model': self.model_combo.currentText(),
+            'k': int(self.k_spin.value()),
+            'fp_tol': None if self.fp_auto.isChecked() else float(self.fp_spin.value()),
+            'cutoff': None if self.cut_auto.isChecked() else float(self.cut_spin.value()),
+        }
 
 
 
